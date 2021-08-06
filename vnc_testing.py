@@ -134,14 +134,44 @@ class SyncVNCClient:
         name_length = struct.unpack(U32, self.s.recv(4))[0]
         name_string = struct.unpack(STRING.format(name_length), 
                                     self.s.recv(name_length))[0]
-        print(framebuffer_width, framebuffer_height, pixel_format, name_string)
+        self.framebuffer_size = (framebuffer_width, framebuffer_height)
+        self.server_pixel_formats = pixel_format
+        self.name = name_string
+
     
+
+    def _handle_framebuffer_update(self, message):
+        number_of_rectangles = _unpack_single(U16, message[2:])
+        pass
+
+    def _handle_set_color_map_entries(self, message):
+        pass
+
+    def _handle_bell(self, message):
+        pass
+
+    def _handle_server_cut_text(self, massage):
+        pass
+
+    def _handle_server_message(self, message):
+        message_handler_callbacks = {
+            0 : self._handle_framebuffer_update,
+            1 : self._handle_set_color_map_entries,
+            2 : self._handle_bell,
+            3 : self._handle_server_cut_text,
+        }
+        message_handler_callbacks[message[0]]
   
+    def _request_framebuffer_update(self, location):
+        pass
+
+    def _get_update_resolution(self, location):
+        pass
+
     def press_key_event(self, key):
         message = struct.unpack(STRING.format(8),
                                 b'\x04\x01\x00\x00\x00\x00' + key)[0]
-        self.s.send(message)
-    
+        self.s.send(message) 
 
     def release_key_event(self, key):
         #message = b'\x04\x00\x00\x00\x00\x00' + key
