@@ -1,6 +1,7 @@
 import socket
 import struct
 import sys
+import time
 
 from des import DesKey
 
@@ -74,16 +75,24 @@ class VClient:
     
   
     def press_key_event(self, key):
-        message = b'\x04\x01\x00\x00\x00\x00' + key
+        message = struct.unpack(STRING.format(8),
+                                b'\x04\x01\x00\x00\x00\x00' + key)[0]
         self.s.send(message)
     
 
     def release_key_event(self, key):
-        message = b'\x04\x00\x00\x00\x00\x00' + key
+        #message = b'\x04\x00\x00\x00\x00\x00' + key
+        message = struct.unpack(STRING.format(8),
+                                b'\x04\x00\x00\x00\x00\x00' + key)[0]
         self.s.send(message)
 
 client = VClient()
 client.protocol_handshake()
 client.security_handshake()
 client.initialization()
-client.send_key_event(b'\xff\x08')
+time.sleep(5)
+client.press_key_event(b'\x00\x61')
+client.press_key_event(b'\x00\x62')
+time.sleep(1)
+client.release_key_event(b'\x00\x61')
+client.release_key_event(b'\x00\x62')
