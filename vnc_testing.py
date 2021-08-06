@@ -1,6 +1,5 @@
 import socket
 import struct
-import sys
 import time
 
 from des import DesKey
@@ -14,41 +13,103 @@ U32 = '>L'
 S8 = 'b'
 S16 = '>h'
 S32 = '>l'
+BOOL = '?'
 STRING = "{}s"
 
-class VClient:
+def _unpack_single(t, data):
+    """
+    Unpacks and returns the first piece of data from a struct
+    """
+    try:
+        return struct.unpack(t, data)[0]
+    except:
+        print(data)
+        raise
 
-    def __init__(self):
-        self.s = socket.create_connection(("localhost", 5900))
-        self.password = b'password'
+class SyncVNCClient:
+    """
+    Synchronous VNC client. Goal is to be as stupid simple and barebones as
+    possible.
+    """
+
+    def __init__(self, hostname, port=5900, password=None, share=False):
+        self.s = socket.create_connection((hostname, port))
+        self.password = password 
+        self.share=share
+        self._connect()
     
     def __del__(self):
         self.s.close()
 
-    def protocol_handshake(self):
-        self.vnc_server_version = self.s.recv(12)
+    def _connect(self):
+        self._protocol_handshake()
+        self._security_handshake()
+        self._initialization()
+
+    def _protocol_handshake(self):
+        self.vnc_server_version = self.s.recv(4096)
+        if self.vnc_server_version == b'RFB 003.008\\n':
+            raise NotImplementedError(f"Backwards compatibility with older protocal versions is not yet supported: {str(self.vnc_server_version)}")
         self.s.send(b'RFB 003.008\n')
 
-# tight vnc sends a malformed VNC packet ?!
-
-    def security_handshake(self):
+    def _security_handshake(self):
         # Get security types 
         types = self.s.recv(4096)
-        # use VNC security
-        self.s.send(b'\x02')
-        challenge = self.s.recv(4096)
-        new_password = self.solve_challenge(challenge)
-        key = DesKey(new_password)
-        response = key.encrypt(challenge)
-        # Send back the encrypted challenge
-        self.s.send(response)
-        # Retrieve SecurityResult
-        self.s.recv(4096)
+        number_of_types = struct.unpack(U8, types[:1])[0]
 
-    def solve_challenge(self, challenge):
+        # handle server aborting the connection
+        if number_of_types == 0:
+            self._get_failure_reason()
+            
+        supported_security_types = struct.unpack(f'{number_of_types}B', types[1:])
+
+        # choose no security by default
+        if 1 in supported_security_types:
+            self.s.send(struct.pack(U8, 1))
+
+        # otherwise use VNC security
+        elif 2 in supported_security_types:
+            if self.password is None:
+                raise ValueError("Server requires a password but one was not supplied")
+
+            # select VNC security
+            self.s.send(struct.pack(U8, 2))
+
+            # server sends a randomly generated challenge
+            challenge = self.s.recv(4096)
+
+            # encrypt the challenge with the password and send it back
+            new_password = self._process_password(self.password)
+            key = DesKey(new_password)
+            response = key.encrypt(challenge)
+            self.s.send(response)
+
+            # Retrieve SecurityResult
+            handshake_result = _unpack_single(U32, self.s.recv(4))
+            if handshake_result:
+                self._get_failure_reason()
+
+        else:
+            raise ConnectionError("VNC Server does not allow any supported security types")
+        
+    def _get_failure_reason(self):
+        failure_packet = self.s.recv(4096)
+        reason_len = _unpack_single(U32, failure_packet[:4])
+        reason = _unpack_single(STRING.format(reason_len), failure_packet[4:])
+        raise ConnectionError(f"VNC Server refused connection with reason: {reason.decode('ASCII')}")
+        
+
+    def _process_password(self, password):
         # encrypt challenge with password
         new_password = bytearray()
-        for b in self.password:
+
+        # pad password with null bits if it's too short, truncate if too long
+        password = password.encode('ASCII') + b'\x00' * 8
+        password = password[:8]
+
+        # for some silly reason you have to reverse the bit order of each of
+        # the individual bytes of the password
+        for b in password:
             _b = 0x00
             for i in range(8):
                 mask = 0b1 << i
@@ -58,12 +119,14 @@ class VClient:
                 else:
                     _b |= (b & mask) << shift_count
             new_password.append(_b)
+
         new_password = bytes(new_password)
         return new_password
 
-    def initialization(self):
-        # ClientInit (don't share)
-        self.s.send(b'\x00')
+    def _initialization(self):
+        # ClientInit
+        self.s.send(struct.pack(BOOL, self.share))
+
         # Start receiving server init
         framebuffer_width = struct.unpack(U16, self.s.recv(2))[0]
         framebuffer_height = struct.unpack(U16, self.s.recv(2))[0]
@@ -86,10 +149,7 @@ class VClient:
                                 b'\x04\x00\x00\x00\x00\x00' + key)[0]
         self.s.send(message)
 
-client = VClient()
-client.protocol_handshake()
-client.security_handshake()
-client.initialization()
+client = SyncVNCClient(hostname="localhost", password="wrong password")
 time.sleep(5)
 client.press_key_event(b'\x00\x61')
 client.press_key_event(b'\x00\x62')
