@@ -1,20 +1,26 @@
+import json
 import socket
 import struct
 import time
 
 from des import DesKey
 
+CHUNK_SIZE = 4096
+
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
 
 U8 = 'B'
-U16 = '>H'
-U32 = '>L'
+U16 = '!H'
+U32 = '!L'
 S8 = 'b'
-S16 = '>h'
-S32 = '>l'
+S16 = '!h'
+S32 = '!l'
 BOOL = '?'
 STRING = "{}s"
+
+RAW_ENCODING = 0
+DESKTOP_SIZE_ENCODING = -223
 
 def _unpack_single(t, data):
     """
@@ -25,6 +31,19 @@ def _unpack_single(t, data):
     except:
         print(data)
         raise
+
+class PixelFormat(object):
+    def __init__(self, bits_per_pixel, depth, big_endian_flag, true_color_flag, red_max, green_max, blue_max, red_shift, green_shift, blue_shift):
+        self.bits_per_pixel = bits_per_pixel
+        self.depth = depth
+        self.big_endian_flag = big_endian_flag
+        self.true_color_flag = true_color_flag
+        self.red_max = red_max
+        self.green_max = green_max
+        self.blue_max = blue_max
+        self.red_shift = red_shift
+        self.green_shift = green_shift
+        self.blue_shift = blue_shift
 
 class SyncVNCClient:
     """
@@ -47,14 +66,14 @@ class SyncVNCClient:
         self._initialization()
 
     def _protocol_handshake(self):
-        self.vnc_server_version = self.s.recv(4096)
+        self.vnc_server_version = self.s.recv(CHUNK_SIZE)
         if self.vnc_server_version == b'RFB 003.008\\n':
             raise NotImplementedError(f"Backwards compatibility with older protocal versions is not yet supported: {str(self.vnc_server_version)}")
         self.s.send(b'RFB 003.008\n')
 
     def _security_handshake(self):
         # Get security types 
-        types = self.s.recv(4096)
+        types = self.s.recv(CHUNK_SIZE)
         number_of_types = struct.unpack(U8, types[:1])[0]
 
         # handle server aborting the connection
@@ -76,7 +95,7 @@ class SyncVNCClient:
             self.s.send(struct.pack(U8, 2))
 
             # server sends a randomly generated challenge
-            challenge = self.s.recv(4096)
+            challenge = self.s.recv(CHUNK_SIZE)
 
             # encrypt the challenge with the password and send it back
             new_password = self._process_password(self.password)
@@ -93,7 +112,7 @@ class SyncVNCClient:
             raise ConnectionError("VNC Server does not allow any supported security types")
         
     def _get_failure_reason(self):
-        failure_packet = self.s.recv(4096)
+        failure_packet = self.s.recv(CHUNK_SIZE)
         reason_len = _unpack_single(U32, failure_packet[:4])
         reason = _unpack_single(STRING.format(reason_len), failure_packet[4:])
         raise ConnectionError(f"VNC Server refused connection with reason: {reason.decode('ASCII')}")
@@ -123,6 +142,17 @@ class SyncVNCClient:
         new_password = bytes(new_password)
         return new_password
 
+    def _set_encodings(self, encodings):
+        message = b''
+        message += struct.pack(U8, 2) # message type (set encoding)
+        message += struct.pack('x') # padding
+        message += struct.pack(U16, len(encodings)) # number of encodings
+        for encoding in encodings:
+            message += struct.pack(S32, encoding) # raw
+        # message += struct.pack(S32, DESKTOP_SIZE_ENCODING) #DesktopSize pseudo-encoding
+        self.s.send(message)
+
+
     def _initialization(self):
         # ClientInit
         self.s.send(struct.pack(BOOL, self.share))
@@ -135,38 +165,95 @@ class SyncVNCClient:
         name_string = struct.unpack(STRING.format(name_length), 
                                     self.s.recv(name_length))[0]
         self.framebuffer_size = (framebuffer_width, framebuffer_height)
-        self.server_pixel_formats = pixel_format
+        self.pixel_format = PixelFormat(*pixel_format)
         self.name = name_string
+        self._set_encodings([RAW_ENCODING, DESKTOP_SIZE_ENCODING])
 
-    
+    def _handle_framebuffer_update(self):
+        def _get_rectangle_header():
+            x_position = _unpack_single(U16, self.s.recv(2))
+            y_position = _unpack_single(U16, self.s.recv(2))
+            width = _unpack_single(U16, self.s.recv(2))
+            height = _unpack_single(U16, self.s.recv(2))
+            encoding_type = _unpack_single(S32, self.s.recv(4))
+            return x_position, y_position, width, height, encoding_type
 
-    def _handle_framebuffer_update(self, message):
-        number_of_rectangles = _unpack_single(U16, message[2:])
+        def _process_rectangle(width, height, encoding_type):
+            if encoding_type == DESKTOP_SIZE_ENCODING:
+                print(f"Processing desktop size change rectangle: ({width}, {height})")
+                self.framebuffer_size = (width, height)
+            elif encoding_type == RAW_ENCODING:
+                # just drop pixel data for now
+                print("RAW rectangle")
+                num_bytes = width * height * self.pixel_format.bits_per_pixel // 8
+                print(f"Grabbing {num_bytes} bytes")
+                n = 0
+                while n < num_bytes:
+                    num_to_grab = min(num_bytes, CHUNK_SIZE)
+                    buffer = self.s.recv(num_to_grab)
+                    n += len(buffer)
+                print(f"Received {n} bytes")
+            else:
+                raise ValueError(f"Server sent unsupported rectangle encoding: {encoding_type}")
+
+        self.s.recv(1)
+        number_of_rectangles = _unpack_single(U16, self.s.recv(2))
+        print(f"Number of rectangles: {number_of_rectangles}")
+        for i in range(number_of_rectangles):
+            print(f"Processing rectangle: {i}")
+            _, _, width, height, encoding_type = _get_rectangle_header()
+            _process_rectangle(width, height, encoding_type)
+
+
+    def _handle_set_color_map_entries(self):
+        self.s.recv(1)
+        _ = _unpack_single(U16, self.s.recv(2))
+        number_of_colors = _unpack_single(U16, self.s.recv(2))
+        
+        # drop color map entries
+        self.s.recv(number_of_colors * 6)
+
+    def _handle_bell(self):
+        # do nothing
         pass
 
-    def _handle_set_color_map_entries(self, message):
-        pass
+    def _handle_server_cut_text(self):
+        self.s.recv(1)
+        length = _unpack_single(U32, self.s.recv(4))
+        
+        # drop clipboard data for now
+        self.s.recv(length)
 
-    def _handle_bell(self, message):
-        pass
-
-    def _handle_server_cut_text(self, massage):
-        pass
-
-    def _handle_server_message(self, message):
+    def _handle_server_message(self, message_type):
         message_handler_callbacks = {
             0 : self._handle_framebuffer_update,
             1 : self._handle_set_color_map_entries,
             2 : self._handle_bell,
             3 : self._handle_server_cut_text,
         }
-        message_handler_callbacks[message[0]]
+        message_handler_callbacks[message_type]()
   
-    def _request_framebuffer_update(self, location):
-        pass
+    def _request_framebuffer_update(self, x, y, width, height, incremental=0):
+        message = struct.pack(U8, 3)
+        message += struct.pack(U8, incremental)
+        message += struct.pack(U16, x)
+        message += struct.pack(U16, y)
+        message += struct.pack(U16, width)
+        message += struct.pack(U16, height)
+        self.s.send(message)
+        framebuffer_updated = False
+        while not framebuffer_updated:
+            message_type = self._check_for_messages()
+            if message_type == 0:
+                framebuffer_updated = True
 
-    def _get_update_resolution(self, location):
-        pass
+    def _check_for_messages(self):
+        message_type = self.s.recv(1)[0]
+        self._handle_server_message(message_type)
+        return message_type
+
+    def _refresh_resolution(self):
+        self._request_framebuffer_update(0, 0, 1, 1, incremental=1)
 
     def press_key_event(self, key):
         message = struct.unpack(STRING.format(8),
@@ -179,10 +266,12 @@ class SyncVNCClient:
                                 b'\x04\x00\x00\x00\x00\x00' + key)[0]
         self.s.send(message)
 
-client = SyncVNCClient(hostname="localhost", password="wrong password")
-time.sleep(5)
-client.press_key_event(b'\x00\x61')
-client.press_key_event(b'\x00\x62')
-time.sleep(1)
-client.release_key_event(b'\x00\x61')
-client.release_key_event(b'\x00\x62')
+client = SyncVNCClient(hostname="localhost", password="test")
+client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
+print("Change resolution now")
+time.sleep(10)
+client._check_for_messages()
+print(f"Current resolution: {client.framebuffer_size}")
+client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
+print(f"Current resolution: {client.framebuffer_size}")
+
