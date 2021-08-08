@@ -1,4 +1,3 @@
-import json
 import socket
 import struct
 import time
@@ -9,6 +8,7 @@ CHUNK_SIZE = 4096
 
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
+KEY_EVENT = "!BBxL"
 
 U8 = 'B'
 U16 = '!H'
@@ -47,7 +47,7 @@ class PixelFormat(object):
 
 class SyncVNCClient:
     """
-    Synchronous VNC client. Goal is to be as stupid simple and barebones as
+    Synchronous VNC client. The goal is to be as stupid simple and barebones as
     possible.
     """
 
@@ -255,16 +255,13 @@ class SyncVNCClient:
     def _refresh_resolution(self):
         self._request_framebuffer_update(0, 0, 1, 1, incremental=1)
 
-    def press_key_event(self, key):
-        message = struct.unpack(STRING.format(8),
-                                b'\x04\x01\x00\x00\x00\x00' + key)[0]
+    def _key_down_event(self, key):
+        message = struct.pack(KEY_EVENT, 4, 1, key)
         self.s.send(message) 
 
-    def release_key_event(self, key):
-        #message = b'\x04\x00\x00\x00\x00\x00' + key
-        message = struct.unpack(STRING.format(8),
-                                b'\x04\x00\x00\x00\x00\x00' + key)[0]
-        self.s.send(message)
+    def _key_up_event(self, key):
+        message = struct.pack(KEY_EVENT, 4, 0, key)
+        self.s.send(message) 
 
 client = SyncVNCClient(hostname="localhost", password="test")
 client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
