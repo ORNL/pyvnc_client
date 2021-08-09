@@ -6,15 +6,14 @@ import time
 from des import DesKey
 from PIL import Image
 
-from keysym import BS, ENTER
+from . import keysym
 
 CHUNK_SIZE = 4096
 
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
-KEY_EVENT = "!BBxL"
 POINTER_EVENT = "!BBHH"
-
+KEY_EVENT = "!BBxxL"
 
 U8 = 'B'
 U16 = '!H'
@@ -61,6 +60,9 @@ class SyncVNCClient:
         self.s = socket.create_connection((hostname, port))
         self.password = password 
         self.share=share
+        self.framebuffer_size = None
+        self.pixel_format = None
+        self.name = None
         self._connect()
     
     def __del__(self):
@@ -252,7 +254,7 @@ class SyncVNCClient:
         return data, width, height
 
 
-    def _request_framebuffer_update(self, x, y, width, height, incremental=0):
+    def _request_framebuffer_update(self, x, y, width, height, incremental=1):
         message = struct.pack(U8, 3)
         message += struct.pack(U8, incremental)
         message += struct.pack(U16, x)
@@ -265,7 +267,8 @@ class SyncVNCClient:
             message_type, data, width, height = self._check_for_messages()
             if message_type == 0:
                 framebuffer_updated = True
-        return data, width, height
+            return data, width, height
+        return None, None, None
 
     def _check_for_messages(self):
         message_type = self.s.recv(1)[0]
@@ -275,27 +278,39 @@ class SyncVNCClient:
     def _refresh_resolution(self):
         self._request_framebuffer_update(0, 0, 1, 1, incremental=1)
 
-    def _key_down_event(self, key):
+
+    def _key_to_keysym(self, key):
+        # single character basic ascii text
+        if len(key) == 1 and ord(key) > 0x1f and ord(key) < 0x7f:
+            return ord(key)
+
+        # key in special_keys dict
+        elif key in keysym.special_keys:
+            return keysym.special_keys[key]
+
+        # assume key is raw binary already
+        else:
+            return key
+
+    def key_down_event(self, key):
+        print(f"Pressing key {key}.")
+        key = self._key_to_keysym(key)
         message = struct.pack(KEY_EVENT, 4, 1, key)
         self.s.send(message) 
 
-    def _key_up_event(self, key):
+    def key_up_event(self, key):
+        print(f"Releasing key {key}.")
+        key = self._key_to_keysym(key)
         message = struct.pack(KEY_EVENT, 4, 0, key)
         self.s.send(message) 
-
     
     # Press and release a key
-    def _type_key(self, key):
-        self._key_down_event(key)
-        self._key_up_event(key)
+    def press_key(self, key, duration=0.01):
+        self.key_down_event(key)
+        time.sleep(duration)
+        self.key_up_event(key)
 
-    # Types an entire ASCII string
-    def _write_string(self, string):
-        for char in string:
-            bytes_ = struct.pack(U16, ord(char))
-            self._type_key(bytes_)
-    
-    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=0, y=0):
+    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=b'\x00\x00', y=b'\x00\x00'):
         button_mask = 0x00
         if left:
             button_mask |= 0x01
@@ -344,23 +359,31 @@ class SyncVNCClient:
         
         # Flatten list. https://stackabuse.com/python-how-to-flatten-list-of-lists
         # allbytes should now be a list of bytes
-        allbytes = [d for sub_data in data[0] for d in sub_data]   
-        
-        for i in range(0, len(allbytes), 4):
-            pixel = allbytes[i:i+4]
-            tmp = pixel[0]
-            pixel[0] = pixel[2]
-            pixel[2] = tmp
-            allbytes[i:i+4] = pixel
+        if (data, width, height) != (None, None, None):
+            allbytes = [d for sub_data in data[0] for d in sub_data]   
             
-        
-        image_data = bytes(allbytes)
+            for i in range(0, len(allbytes), 4):
+                pixel = allbytes[i:i+4]
+                tmp = pixel[0]
+                pixel[0] = pixel[2]
+                pixel[2] = tmp
+                allbytes[i:i+4] = pixel
+                
+            
+            image_data = bytes(allbytes)
 
-        img = Image.frombytes("RGBX", (width, height), image_data)
-        img.show()
-        img.save(filename)
+            img = Image.frombytes("RGBX", (width, height), image_data)
+            img.show()
+            img.save(filename)
 
 client = SyncVNCClient(hostname="localhost", password="password")
-print(client.pixel_format.red_shift, client.pixel_format.green_shift, client.pixel_format.blue_shift)
 time.sleep(5)
 client._screenshot()
+#client = SyncVNCClient(hostname="localhost", password="test")
+#client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
+#print("Change resolution now")
+#time.sleep(10)
+#client._check_for_messages()
+#print(f"Current resolution: {client.framebuffer_size}")
+#client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
+#print(f"Current resolution: {client.framebuffer_size}")
