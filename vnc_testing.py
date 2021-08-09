@@ -11,6 +11,8 @@ CHUNK_SIZE = 4096
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
 KEY_EVENT = "!BBxL"
+POINTER_EVENT = "!BBHH"
+
 
 U8 = 'B'
 U16 = '!H'
@@ -281,7 +283,7 @@ class SyncVNCClient:
             bytes_ = struct.pack(U16, ord(char))
             self._type_key(bytes_)
     
-    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=b'\x00\x00', y=b'\x00\x00'):
+    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=0, y=0):
         button_mask = 0x00
         if left:
             button_mask |= 0x01
@@ -298,19 +300,36 @@ class SyncVNCClient:
         if down:
             button_mask |= 0x10
         
-        bm_bytes = struct.pack(U8, button_mask)
-        event = struct.unpack(STRING.format(6),
-                                b'\x05' + bm_bytes + x + y)[0]
+        
+        #Click
+        event = struct.pack(POINTER_EVENT, 0x05, button_mask, x, y)
         self.s.send(event)
-        event = struct.unpack(STRING.format(6),
-                                b'\x05\x00' + x + y)[0]
+        
+        #Release
+        event = struct.pack(POINTER_EVENT, 0x05, 0x00, x, y)
         self.s.send(event)
+            
+    def _left_click(self, x=0, y=0):
+        self._pointer_event(left=True, x=x, y=y)
 
-client = SyncVNCClient(hostname="localhost", password="test")
-client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-print("Change resolution now")
-time.sleep(10)
-client._check_for_messages()
-print(f"Current resolution: {client.framebuffer_size}")
-client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-print(f"Current resolution: {client.framebuffer_size}")
+    def _middle_click(self, x=0, y=0):
+        self._pointer_event(middle=True, x=x, y=y)
+
+    def _right_click(self, x=0, y=0):
+        self._pointer_event(right=True, x=x, y=y)
+
+    def _up_scroll(self, distance=1):
+        for i in range(distance): 
+            self._pointer_event(up=True)
+
+    def _down_scroll(self, distance=1):
+        for i in range(distance): 
+            self._pointer_event(down=True)
+
+    def _screenshot(self):
+
+
+client = SyncVNCClient(hostname="localhost", password="password")
+time.sleep(3)
+client._down_scroll(5)
+client._left_click(512, 0)
