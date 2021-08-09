@@ -1,6 +1,7 @@
 import socket
 import struct
 import time
+import keysym
 
 from des import DesKey
 from keysym import BS, ENTER
