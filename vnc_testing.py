@@ -3,7 +3,10 @@ import struct
 import time
 import keysym
 
+
 from des import DesKey
+from PIL import Image
+
 from keysym import BS, ENTER
 
 CHUNK_SIZE = 4096
@@ -196,22 +199,29 @@ class SyncVNCClient:
                 num_bytes = width * height * self.pixel_format.bits_per_pixel // 8
                 print(f"Grabbing {num_bytes} bytes")
                 n = 0
+                
+                all_bytes = []
+
                 while n < num_bytes:
                     num_to_grab = min(num_bytes, CHUNK_SIZE)
                     buffer = self.s.recv(num_to_grab)
+                    all_bytes.append(buffer)
                     n += len(buffer)
-                print(f"Received {n} bytes")
             else:
                 raise ValueError(f"Server sent unsupported rectangle encoding: {encoding_type}")
-
+            
+            return all_bytes
+        
         self.s.recv(1)
         number_of_rectangles = _unpack_single(U16, self.s.recv(2))
         print(f"Number of rectangles: {number_of_rectangles}")
+        data = []       
+        width, height = 0, 0
         for i in range(number_of_rectangles):
             print(f"Processing rectangle: {i}")
             _, _, width, height, encoding_type = _get_rectangle_header()
-            _process_rectangle(width, height, encoding_type)
-
+            data.append(_process_rectangle(width, height, encoding_type))
+        return data, width, height
 
     def _handle_set_color_map_entries(self):
         self.s.recv(1)
@@ -239,8 +249,10 @@ class SyncVNCClient:
             2 : self._handle_bell,
             3 : self._handle_server_cut_text,
         }
-        message_handler_callbacks[message_type]()
-  
+        data, width, height = message_handler_callbacks[message_type]()
+        return data, width, height
+
+
     def _request_framebuffer_update(self, x, y, width, height, incremental=0):
         message = struct.pack(U8, 3)
         message += struct.pack(U8, incremental)
@@ -251,14 +263,15 @@ class SyncVNCClient:
         self.s.send(message)
         framebuffer_updated = False
         while not framebuffer_updated:
-            message_type = self._check_for_messages()
+            message_type, data, width, height = self._check_for_messages()
             if message_type == 0:
                 framebuffer_updated = True
+        return data, width, height
 
     def _check_for_messages(self):
         message_type = self.s.recv(1)[0]
-        self._handle_server_message(message_type)
-        return message_type
+        data, width, height = self._handle_server_message(message_type)
+        return message_type, data, width, height
 
     def _refresh_resolution(self):
         self._request_framebuffer_update(0, 0, 1, 1, incremental=1)
@@ -326,10 +339,20 @@ class SyncVNCClient:
         for i in range(distance): 
             self._pointer_event(down=True)
 
-    def _screenshot(self):
+    def _screenshot(self, filename="screenshot.png"):
+        data, width, height = client._request_framebuffer_update(0, 0, 1, 1, incremental=0)
+        
+        
+        # Flatten list. https://stackabuse.com/python-how-to-flatten-list-of-lists
+        # allbytes should now be a list of bytes
+        allbytes = [d for sub_data in data[0] for d in sub_data]   
+        
+        
+        image_data = bytes(allbytes)
 
+        img = Image.frombytes("RGBA", (width, height), image_data)
+        img.show()
+        img.save(filename)
 
 client = SyncVNCClient(hostname="localhost", password="password")
-time.sleep(3)
-client._down_scroll(5)
-client._left_click(512, 0)
+client._screenshot()
