@@ -347,12 +347,21 @@ class SyncVNCClient:
         # allbytes should now be a list of bytes
         allbytes = [d for sub_data in data[0] for d in sub_data]   
         
+        for i in range(0, len(allbytes), 4):
+            pixel = allbytes[i:i+4]
+            tmp = pixel[0]
+            pixel[0] = pixel[2]
+            pixel[2] = tmp
+            allbytes[i:i+4] = pixel
+            
         
         image_data = bytes(allbytes)
 
-        img = Image.frombytes("RGBA", (width, height), image_data)
+        img = Image.frombytes("RGBX", (width, height), image_data)
         img.show()
         img.save(filename)
 
 client = SyncVNCClient(hostname="localhost", password="password")
+print(client.pixel_format.red_shift, client.pixel_format.green_shift, client.pixel_format.blue_shift)
+time.sleep(5)
 client._screenshot()
