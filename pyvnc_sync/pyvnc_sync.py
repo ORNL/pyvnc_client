@@ -6,7 +6,7 @@ import time
 from des import DesKey
 from PIL import Image
 
-from . import keysym
+from keysym import *
 
 CHUNK_SIZE = 4096
 
@@ -237,11 +237,11 @@ class SyncVNCClient:
         pass
 
     def _handle_server_cut_text(self):
-        self.s.recv(1)
+        print(self.s.recv(1))
         length = _unpack_single(U32, self.s.recv(4))
-        
+        print(length)
         # drop clipboard data for now
-        self.s.recv(length)
+        print(self.s.recv(length))
 
     def _handle_server_message(self, message_type):
         message_handler_callbacks = {
@@ -250,7 +250,14 @@ class SyncVNCClient:
             2 : self._handle_bell,
             3 : self._handle_server_cut_text,
         }
-        data, width, height = message_handler_callbacks[message_type]()
+
+        data, width, height = None, 0, 0
+        if message_type == 0:
+            data, width, height = message_handler_callbacks[message_type]()
+        else:
+            message_handler_callbacks[message_type]()
+
+
         return data, width, height
 
 
@@ -272,6 +279,7 @@ class SyncVNCClient:
 
     def _check_for_messages(self):
         message_type = self.s.recv(1)[0]
+        print(message_type)
         data, width, height = self._handle_server_message(message_type)
         return message_type, data, width, height
 
@@ -310,7 +318,7 @@ class SyncVNCClient:
         time.sleep(duration)
         self.key_up_event(key)
 
-    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=b'\x00\x00', y=b'\x00\x00'):
+    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=0, y=0):
         button_mask = 0x00
         if left:
             button_mask |= 0x01
@@ -336,24 +344,24 @@ class SyncVNCClient:
         event = struct.pack(POINTER_EVENT, 0x05, 0x00, x, y)
         self.s.send(event)
             
-    def _left_click(self, x=0, y=0):
+    def left_click(self, x=0, y=0):
         self._pointer_event(left=True, x=x, y=y)
 
-    def _middle_click(self, x=0, y=0):
+    def middle_click(self, x=0, y=0):
         self._pointer_event(middle=True, x=x, y=y)
 
-    def _right_click(self, x=0, y=0):
+    def right_click(self, x=0, y=0):
         self._pointer_event(right=True, x=x, y=y)
 
-    def _up_scroll(self, distance=1):
+    def up_scroll(self, distance=1):
         for i in range(distance): 
             self._pointer_event(up=True)
 
-    def _down_scroll(self, distance=1):
+    def down_scroll(self, distance=1):
         for i in range(distance): 
             self._pointer_event(down=True)
 
-    def _screenshot(self, filename="screenshot.png"):
+    def screenshot(self, filename="screenshot.png"):
         data, width, height = client._request_framebuffer_update(0, 0, 1, 1, incremental=0)
         
         
@@ -374,16 +382,24 @@ class SyncVNCClient:
 
             img = Image.frombytes("RGBX", (width, height), image_data)
             img.show()
+            img = img.convert("RGB")
             img.save(filename)
 
+
+    def cut_buffer(self, buffer):
+        length = len(buffer)
+        message = struct.pack(U8, 6)
+        message += struct.pack('x') 
+        message += struct.pack('x') 
+        message += struct.pack('x') 
+        message += struct.pack(U32, length)
+        for b in buffer:
+            message += struct.pack(U8, ord(b))
+        self.s.send(message)
+
+
+
 client = SyncVNCClient(hostname="localhost", password="password")
-time.sleep(5)
-client._screenshot()
-#client = SyncVNCClient(hostname="localhost", password="test")
-#client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-#print("Change resolution now")
-#time.sleep(10)
+#client._handle_server_cut_text()
+#time.sleep(5)
 #client._check_for_messages()
-#print(f"Current resolution: {client.framebuffer_size}")
-#client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-#print(f"Current resolution: {client.framebuffer_size}")
