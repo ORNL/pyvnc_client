@@ -1,7 +1,7 @@
+import logging
 import socket
 import struct
 import time
-
 
 from des import DesKey
 from PIL import Image
@@ -12,6 +12,7 @@ CHUNK_SIZE = 4096
 
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
+SET_PIXEL_FORMAT = "Bxxx16s"
 POINTER_EVENT = "!BBHH"
 KEY_EVENT = "!BBxxL"
 
@@ -27,6 +28,9 @@ STRING = "{}s"
 RAW_ENCODING = 0
 DESKTOP_SIZE_ENCODING = -223
 
+logger = logging.getLogger("pyvnc_sync")
+logger.setLevel(logging.ERROR)
+
 def _unpack_single(t, data):
     """
     Unpacks and returns the first piece of data from a struct
@@ -37,8 +41,85 @@ def _unpack_single(t, data):
         print(data)
         raise
 
+
+class FrameBuffer(object):
+    def __init__(self, width, height, bytes_per_pixel):
+        self.width = width
+        self.height = height
+        self.bytes_per_pixel = bytes_per_pixel
+        self.framebuffer = []
+        self._init_framebuffer()
+
+    def _init_framebuffer(self):
+        blank_pixel = b'\x00' * self.bytes_per_pixel
+        blank_row = [blank_pixel] * self.width
+        for _ in range(self.height):
+            self.framebuffer.append(blank_row.copy())
+
+    def resize(self, width, height):
+        self.width = width
+        self.height = height
+        self._init_framebuffer()
+
+    def set_pixels(self, x_position, y_position, width, height, pixel_bytes):
+        """
+        Set the pixels to a rectangle at x, y with width, height and
+        pixel_bytes.  Will resize the framebuffer as needed if the any pixels
+        fall outside the existing width/height.
+        """
+
+        logger.debug(f"Setting pixels at x={x_position} y={y_position} width={width} height={height}")
+        pixel_matrix = []
+        # check to see if pixel_bytes is properly divisible
+        if len(pixel_bytes) % (width * self.bytes_per_pixel) != 0:
+            raise ValueError(f"Number of pixel bytes received ({len(pixel_bytes)}) is not divisible by width * bytes_per_pixel ({width * self.bytes_per_pixel}).")
+        for i in range(height):
+            row = []
+            for j in range(0, len(pixel_bytes) // height, self.bytes_per_pixel):
+                row.append(pixel_bytes[i * width * self.bytes_per_pixel + j : i * width * self.bytes_per_pixel + j + self.bytes_per_pixel])
+            pixel_matrix.append(row)
+
+        # check if the framebuffer needs to be resized based on the x, y, width, height
+        need_resize = False
+        if x_position + width > self.width:
+            self.width = x_position + width
+            need_resize = True
+        if y_position + height > self.height:
+            self.height = y_position + height
+            need_resize = True
+        if need_resize:
+            self._init_framebuffer()
+
+        for i, row in enumerate(pixel_matrix):
+            if logger.level <= logging.DEBUG: # don't do this extra logic unless debug is on
+                row_log = b"".join(row)
+                old_row_log = b"".join(self.framebuffer[y_position + i][x_position : x_position + width])
+                #logger.debug(f"Old row: \n{old_row_log}\nNew row:\n{row_log}")
+            self.framebuffer[y_position + i][x_position : x_position + width] = row
+        logger.debug("Done setting pixels")
+
+    def flatten(self):
+        """
+        Flattens the 2D array of byte strings to a single string of bytes
+        """
+        return b"".join(map(lambda x: b"".join(x), self.framebuffer))
+
+    def __str__(self):
+        s = ""
+        for row in self.framebuffer:
+            s += str(row) + "\n"
+        return s
+
+    
+
 class PixelFormat(object):
-    def __init__(self, bits_per_pixel, depth, big_endian_flag, true_color_flag, red_max, green_max, blue_max, red_shift, green_shift, blue_shift):
+    """
+    A class for storing the PixelFormat struct
+    """
+
+    def __init__(self, bits_per_pixel=32, depth=32, big_endian_flag=0, true_color_flag=1, red_max=65280, green_max=65280, blue_max=65280, red_shift=0, green_shift=8, blue_shift=16):
+        # default options here are the preferred pixel_format options and are
+        # currently the only supported ones for screenshots to work
         self.bits_per_pixel = bits_per_pixel
         self.depth = depth
         self.big_endian_flag = big_endian_flag
@@ -50,24 +131,31 @@ class PixelFormat(object):
         self.green_shift = green_shift
         self.blue_shift = blue_shift
 
+    def pack(self):
+        return struct.pack(PIXEL_FORMAT, self.bits_per_pixel, self.depth, self.big_endian_flag, self.true_color_flag, self.red_max, self.green_max, self.blue_max, self.red_shift, self.green_shift, self.blue_shift)
+        
+
 class SyncVNCClient:
     """
     Synchronous VNC client. The goal is to be as stupid simple and barebones as
     possible.
     """
 
-    def __init__(self, hostname, port=5900, password=None, share=False):
+    def __init__(self, hostname, port=5900, password=None, share=False, pixel_format=PixelFormat(), log_level=logging.ERROR):
+        logger.setLevel(log_level)
+        logging.basicConfig(level=log_level)
         self.s = socket.create_connection((hostname, port))
         self.password = password 
         self.share=share
-        self.framebuffer_size = None
-        self.pixel_format = None
+        self.framebuffer = FrameBuffer(0, 0, 4)
+        self.pixel_format = pixel_format
+        self.server_pixel_format = None
         self.name = None
+        self.mouse_buttons = 0x00
         self._connect()
     
     def __del__(self):
         self.s.close()
-
     
     def _connect(self):
         self._protocol_handshake()
@@ -177,9 +265,20 @@ class SyncVNCClient:
         name_string = struct.unpack(STRING.format(name_length), 
                                     self.s.recv(name_length))[0]
         self.framebuffer_size = (framebuffer_width, framebuffer_height)
-        self.pixel_format = PixelFormat(*pixel_format)
+        self.server_pixel_format = PixelFormat(*pixel_format)
         self.name = name_string
         self._set_encodings([RAW_ENCODING, DESKTOP_SIZE_ENCODING])
+        self._set_pixel_format()
+
+    def _set_pixel_format(self, pixel_format=None):
+        if pixel_format is None:
+            pixel_format = self.pixel_format
+        else:
+            self.pixel_format = pixel_format
+
+        self.s.send(struct.pack(SET_PIXEL_FORMAT, 0, pixel_format.pack()))
+
+
 
     def _handle_framebuffer_update(self):
         def _get_rectangle_header():
@@ -188,41 +287,49 @@ class SyncVNCClient:
             width = _unpack_single(U16, self.s.recv(2))
             height = _unpack_single(U16, self.s.recv(2))
             encoding_type = _unpack_single(S32, self.s.recv(4))
+            logger.debug(f"x={x_position} y={y_position} width={width} height={height} encoding_type={encoding_type}")
             return x_position, y_position, width, height, encoding_type
 
-        def _process_rectangle(width, height, encoding_type):
-            if encoding_type == DESKTOP_SIZE_ENCODING:
-                print(f"Processing desktop size change rectangle: ({width}, {height})")
-                self.framebuffer_size = (width, height)
-            elif encoding_type == RAW_ENCODING:
-                # just drop pixel data for now
-                print("RAW rectangle")
-                num_bytes = width * height * self.pixel_format.bits_per_pixel // 8
-                print(f"Grabbing {num_bytes} bytes")
-                n = 0
-                
-                all_bytes = []
+        def _collect_rectangle(width, height, encoding_type):
 
+            pixel_data = b''
+            if encoding_type == RAW_ENCODING:
+                num_bytes = width * height * self.pixel_format.bits_per_pixel // 8
+                logger.debug(f"Collecting {num_bytes} bytes from socket for rectangle.")
+                n = 0
                 while n < num_bytes:
-                    num_to_grab = min(num_bytes, CHUNK_SIZE)
+                    num_to_grab = min(num_bytes - n, CHUNK_SIZE)
                     buffer = self.s.recv(num_to_grab)
-                    all_bytes.append(buffer)
+                    pixel_data = pixel_data + buffer
                     n += len(buffer)
+                if n > num_bytes:
+                    logger.warning("Received wrong number of bytes in rectangle.")
             else:
                 raise ValueError(f"Server sent unsupported rectangle encoding: {encoding_type}")
             
-            return all_bytes
+            return pixel_data
         
         self.s.recv(1)
         number_of_rectangles = _unpack_single(U16, self.s.recv(2))
-        print(f"Number of rectangles: {number_of_rectangles}")
-        data = []       
-        width, height = 0, 0
-        for i in range(number_of_rectangles):
-            print(f"Processing rectangle: {i}")
-            _, _, width, height, encoding_type = _get_rectangle_header()
-            data.append(_process_rectangle(width, height, encoding_type))
-        return data, width, height
+        logger.debug(f"{number_of_rectangles} rectangles")
+        rectangles = []
+        resize = False
+        new_width, new_height = 0, 0
+        for _ in range(number_of_rectangles):
+            logger.debug(f"Processing rectangle {_}")
+            pixel_data = []       
+            x, y, width, height, encoding_type = _get_rectangle_header()
+            if encoding_type == DESKTOP_SIZE_ENCODING:
+                resize = True
+                new_width, new_height = width, height
+            else:
+                pixel_data = _collect_rectangle(width, height, encoding_type)
+                rectangles.append((x, y, width, height, pixel_data))
+        if resize:
+            self.framebuffer.resize(new_width, new_height)
+        for rectangle in rectangles:
+            self.framebuffer.set_pixels(*rectangle)
+                
 
     def _handle_set_color_map_entries(self):
         self.s.recv(1)
@@ -240,7 +347,7 @@ class SyncVNCClient:
         self.s.recv(1)
         length = _unpack_single(U32, self.s.recv(4))
         
-        # drop clipboard data for now
+        # drop clipboard data nor now
         self.s.recv(length)
 
     def _handle_server_message(self, message_type):
@@ -250,8 +357,7 @@ class SyncVNCClient:
             2 : self._handle_bell,
             3 : self._handle_server_cut_text,
         }
-        data, width, height = message_handler_callbacks[message_type]()
-        return data, width, height
+        message_handler_callbacks[message_type]()
 
 
     def _request_framebuffer_update(self, x, y, width, height, incremental=1):
@@ -264,20 +370,17 @@ class SyncVNCClient:
         self.s.send(message)
         framebuffer_updated = False
         while not framebuffer_updated:
-            message_type, data, width, height = self._check_for_messages()
+            message_type = self._check_for_messages()
             if message_type == 0:
                 framebuffer_updated = True
-            return data, width, height
-        return None, None, None
 
     def _check_for_messages(self):
         message_type = self.s.recv(1)[0]
-        data, width, height = self._handle_server_message(message_type)
-        return message_type, data, width, height
+        self._handle_server_message(message_type)
+        return message_type
 
     def _refresh_resolution(self):
         self._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-
 
     def _key_to_keysym(self, key):
         # single character basic ascii text
@@ -293,13 +396,11 @@ class SyncVNCClient:
             return key
 
     def key_down_event(self, key):
-        print(f"Pressing key {key}.")
         key = self._key_to_keysym(key)
         message = struct.pack(KEY_EVENT, 4, 1, key)
         self.s.send(message) 
 
     def key_up_event(self, key):
-        print(f"Releasing key {key}.")
         key = self._key_to_keysym(key)
         message = struct.pack(KEY_EVENT, 4, 0, key)
         self.s.send(message) 
@@ -310,75 +411,74 @@ class SyncVNCClient:
         time.sleep(duration)
         self.key_up_event(key)
 
-    def _pointer_event(self, left=False, middle=False, right=False, up=False, down=False, x=b'\x00\x00', y=b'\x00\x00'):
-        button_mask = 0x00
-        if left:
-            button_mask |= 0x01
-        
-        if middle:
-            button_mask |= 0x02
+    def _button_click(self, button, x, y, duration=0.01):
+        self.pointer_event(buttons=[button], down=True, x=x, y=y)
+        time.sleep(duration)
+        self.pointer_event(buttons=[button], down=False, x=x, y=y)
 
-        if right:
-            button_mask |= 0x04
+    def left_click(self, x, y, duration=0.01):
+        self._button_click(1, x, y, duration)
 
-        if up:
-            button_mask |= 0x08
+    def right_click(self, x, y, duration=0.01):
+        self._button_click(3, x, y, duration)
 
+    def middle_click(self, x, y, duration=0.01):
+        self._button_click(2, x, y, duration)
+
+    def scroll_up(self, x, y, duration=0.01):
+        self._button_click(4, x, y, duration)
+
+    def scroll_down(self, x, y, duration=0.01):
+        self._button_click(5, x, y, duration)
+
+    def pointer_event(self, buttons=[], down=False, x=0, y=0):
+        """
+        Edit the current mouse button mask and send it to the server as a pointer event
+        Down=False clears the bits in buttons
+        Down=True sets the bits in buttons
+        IE calling pointer_event(buttons=[1, 2], down=True) will mark the left and middle mouse buttons as down at (0, 0)
+        """
         if down:
-            button_mask |= 0x10
-        
-        
-        #Click
-        event = struct.pack(POINTER_EVENT, 0x05, button_mask, x, y)
+            # do not affect buttons that are already down
+            button_mask = 0x00
+        else:
+            # do not affect buttons that are already up
+            button_mask = 0xFF
+
+        # flip the corresponding bits in the mask
+        for button in buttons:
+            button_mask ^= 1 << button
+
+        # apply the mask to the mouse_buttons member
+        if down:
+            self.mouse_buttons |= button_mask
+        else:
+            self.mouse_buttons &= button_mask
+
+        # send the current mouse_buttons to the server
+        event = struct.pack(POINTER_EVENT, 0x05, self.mouse_buttons, x, y)
         self.s.send(event)
-        
-        #Release
-        event = struct.pack(POINTER_EVENT, 0x05, 0x00, x, y)
-        self.s.send(event)
-            
-    def _left_click(self, x=0, y=0):
-        self._pointer_event(left=True, x=x, y=y)
 
-    def _middle_click(self, x=0, y=0):
-        self._pointer_event(middle=True, x=x, y=y)
+    def screenshot(self, filename="screenshot.png", refresh=True, incremental=0, show=False, x=0, y=0, width=1, height=1):
+        if refresh:
+            self._request_framebuffer_update(x, y, width, height, incremental=incremental)
+       
+        # Flatten list
+        img = Image.frombytes("RGBX", (self.framebuffer.width, self.framebuffer.height), self.framebuffer.flatten())
+        rgb_image = img.convert("RGB")
+        if show:
+            rgb_image.show()
+        else:
+            rgb_image.save(filename)
 
-    def _right_click(self, x=0, y=0):
-        self._pointer_event(right=True, x=x, y=y)
-
-    def _up_scroll(self, distance=1):
-        for i in range(distance): 
-            self._pointer_event(up=True)
-
-    def _down_scroll(self, distance=1):
-        for i in range(distance): 
-            self._pointer_event(down=True)
-
-    def _screenshot(self, filename="screenshot.png"):
-        data, width, height = client._request_framebuffer_update(0, 0, 1, 1, incremental=0)
-        
-        
-        # Flatten list. https://stackabuse.com/python-how-to-flatten-list-of-lists
-        # allbytes should now be a list of bytes
-        if (data, width, height) != (None, None, None):
-            allbytes = [d for sub_data in data[0] for d in sub_data]   
-            
-            for i in range(0, len(allbytes), 4):
-                pixel = allbytes[i:i+4]
-                tmp = pixel[0]
-                pixel[0] = pixel[2]
-                pixel[2] = tmp
-                allbytes[i:i+4] = pixel
-                
-            
-            image_data = bytes(allbytes)
-
-            img = Image.frombytes("RGBX", (width, height), image_data)
-            img.show()
-            img.save(filename)
-
-client = SyncVNCClient(hostname="localhost", password="password")
+#f = FrameBuffer(10, 10, 4)
+#f.set_pixels(1, 1, 2, 3, b'\x01\x01\x01\x01' * 6)
+client = SyncVNCClient(hostname="localhost", password="navwar", log_level=logging.DEBUG)
 time.sleep(5)
-client._screenshot()
+client.screenshot(show=True)
+print("Mess with the window now")
+time.sleep(5)
+client.screenshot(show=True)
 #client = SyncVNCClient(hostname="localhost", password="test")
 #client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
 #print("Change resolution now")
