@@ -8,7 +8,7 @@ from PIL import Image
 
 from . import keysym
 
-CHUNK_SIZE = 4096
+CHUNK_SIZE = 65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
 
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
@@ -42,7 +42,7 @@ def _unpack_single(t, data):
         raise
 
 
-class FrameBuffer(object):
+class Framebuffer(object):
     def __init__(self, width, height, bytes_per_pixel):
         self.width = width
         self.height = height
@@ -147,7 +147,7 @@ class SyncVNCClient:
         self.s = socket.create_connection((hostname, port))
         self.password = password 
         self.share=share
-        self.framebuffer = FrameBuffer(0, 0, 4)
+        self.framebuffer = Framebuffer(0, 0, 4)
         self.pixel_format = pixel_format
         self.server_pixel_format = None
         self.name = None
@@ -264,11 +264,13 @@ class SyncVNCClient:
         name_length = struct.unpack(U32, self.s.recv(4))[0]
         name_string = struct.unpack(STRING.format(name_length), 
                                     self.s.recv(name_length))[0]
-        self.framebuffer_size = (framebuffer_width, framebuffer_height)
         self.server_pixel_format = PixelFormat(*pixel_format)
         self.name = name_string
         self._set_encodings([RAW_ENCODING, DESKTOP_SIZE_ENCODING])
         self._set_pixel_format()
+
+        # re-init the framebuffer
+        self.framebuffer = Framebuffer(framebuffer_width, framebuffer_height, self.pixel_format.bits_per_pixel // 8)
 
     def _set_pixel_format(self, pixel_format=None):
         if pixel_format is None:
@@ -315,10 +317,14 @@ class SyncVNCClient:
         rectangles = []
         resize = False
         new_width, new_height = 0, 0
+
+        # collect the rectangles
         for _ in range(number_of_rectangles):
             logger.debug(f"Processing rectangle {_}")
             pixel_data = []       
             x, y, width, height, encoding_type = _get_rectangle_header()
+
+            # resize the framebuffer
             if encoding_type == DESKTOP_SIZE_ENCODING:
                 resize = True
                 new_width, new_height = width, height
@@ -377,8 +383,18 @@ class SyncVNCClient:
         self._handle_server_message(message_type)
         return message_type
 
-    def _refresh_resolution(self):
+    def refresh_resolution(self):
+        """
+        Requests an incremental framebuffer update with only 1 pixel. Hopefully
+        the server actually only sends back 1 pixel, but there's no guarantee.
+        """
         self._request_framebuffer_update(0, 0, 1, 1, incremental=1)
+
+    def refresh_framebuffer(self):
+        """
+        Requests a full framebuffer update. This takes a hot second.
+        """
+        self._request_framebuffer_update(0, 0, 1, 1, incremental=0)
 
     def _key_to_keysym(self, key):
         # single character basic ascii text
