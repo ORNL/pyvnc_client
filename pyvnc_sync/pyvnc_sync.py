@@ -344,10 +344,9 @@ class SyncVNCClient:
         pass
 
     def _handle_server_cut_text(self):
-        self.s.recv(1)
+        print(self.s.recv(1))
         length = _unpack_single(U32, self.s.recv(4))
-        
-        # drop clipboard data nor now
+        # drop clipboard data for now
         self.s.recv(length)
 
     def _handle_server_message(self, message_type):
@@ -358,7 +357,6 @@ class SyncVNCClient:
             3 : self._handle_server_cut_text,
         }
         message_handler_callbacks[message_type]()
-
 
     def _request_framebuffer_update(self, x, y, width, height, incremental=1):
         message = struct.pack(U8, 3)
@@ -471,19 +469,13 @@ class SyncVNCClient:
         else:
             rgb_image.save(filename)
 
-#f = FrameBuffer(10, 10, 4)
-#f.set_pixels(1, 1, 2, 3, b'\x01\x01\x01\x01' * 6)
-client = SyncVNCClient(hostname="localhost", password="navwar", log_level=logging.DEBUG)
-time.sleep(5)
-client.screenshot(show=True)
-print("Mess with the window now")
-time.sleep(5)
-client.screenshot(show=True)
-#client = SyncVNCClient(hostname="localhost", password="test")
-#client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-#print("Change resolution now")
-#time.sleep(10)
-#client._check_for_messages()
-#print(f"Current resolution: {client.framebuffer_size}")
-#client._request_framebuffer_update(0, 0, 1, 1, incremental=1)
-#print(f"Current resolution: {client.framebuffer_size}")
+    def cut_buffer(self, buffer):
+        length = len(buffer)
+        message = struct.pack(U8, 6)
+        message += struct.pack('x') 
+        message += struct.pack('x') 
+        message += struct.pack('x') 
+        message += struct.pack(U32, length)
+        for b in buffer:
+            message += struct.pack(U8, ord(b))
+        self.s.send(message)
