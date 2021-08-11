@@ -6,7 +6,7 @@ import time
 from des import DesKey
 from PIL import Image
 
-from . import keysym
+from keysym import *
 
 CHUNK_SIZE = 65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
 
@@ -478,12 +478,15 @@ class SyncVNCClient:
             self._request_framebuffer_update(x, y, width, height, incremental=incremental)
        
         # Flatten list
+        print(self.framebuffer.flatten()[1000:2000])
         img = Image.frombytes("RGBX", (self.framebuffer.width, self.framebuffer.height), self.framebuffer.flatten())
         rgb_image = img.convert("RGB")
         if show:
             rgb_image.show()
         else:
             rgb_image.save(filename)
+        #self.framebuffer = Framebuffer(0, 0, 4)
+    
 
     def cut_buffer(self, buffer):
         length = len(buffer)
@@ -495,3 +498,11 @@ class SyncVNCClient:
         for b in buffer:
             message += struct.pack(U8, ord(b))
         self.s.send(message)
+
+
+client = SyncVNCClient(hostname="localhost", password="password")
+client.screenshot(show = True)
+time.sleep(2)
+client = SyncVNCClient(hostname="localhost", password="password")
+client.screenshot(show = True)
+#client.screenshot(refresh=False, incremental=2, show = True)
