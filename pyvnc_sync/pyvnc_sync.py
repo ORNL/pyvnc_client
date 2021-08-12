@@ -8,7 +8,7 @@ from PIL import Image
 
 from keysym import *
 
-CHUNK_SIZE = 65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
+CHUNK_SIZE = 4096 #65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
 
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
@@ -152,6 +152,7 @@ class SyncVNCClient:
         self.server_pixel_format = None
         self.name = None
         self.mouse_buttons = 0x00
+        self.first_screenshot = True
         self._connect()
     
     def __del__(self):
@@ -311,7 +312,7 @@ class SyncVNCClient:
             
             return pixel_data
         
-        self.s.recv(1)
+        self.s.recv(1) # Get rid of padding byte
         number_of_rectangles = _unpack_single(U16, self.s.recv(2))
         logger.debug(f"{number_of_rectangles} rectangles")
         rectangles = []
@@ -329,6 +330,7 @@ class SyncVNCClient:
                 resize = True
                 new_width, new_height = width, height
             else:
+                print(width,height)
                 pixel_data = _collect_rectangle(width, height, encoding_type)
                 rectangles.append((x, y, width, height, pixel_data))
         if resize:
@@ -474,19 +476,27 @@ class SyncVNCClient:
         self.s.send(event)
 
     def screenshot(self, filename="screenshot.png", refresh=True, incremental=0, show=False, x=0, y=0, width=1, height=1):
-        if refresh:
-            self._request_framebuffer_update(x, y, width, height, incremental=incremental)
-       
+        
+        # Always need to call with incremental = 0 to actually get a screenshot.
+        # Seems to get a blank screen otherwise.
+        self._request_framebuffer_update(x, y, width, height, incremental=0)
+
+        # If this is not the 1st screenshot, then use incremental=2.
+        if not self.first_screenshot:
+            self._request_framebuffer_update(x, y, 1447, 737, incremental=2)
+        
+
         # Flatten list
-        print(self.framebuffer.flatten()[1000:2000])
         img = Image.frombytes("RGBX", (self.framebuffer.width, self.framebuffer.height), self.framebuffer.flatten())
         rgb_image = img.convert("RGB")
         if show:
             rgb_image.show()
         else:
             rgb_image.save(filename)
-        #self.framebuffer = Framebuffer(0, 0, 4)
-    
+        self.first_screenshot = False
+        
+        
+        
 
     def cut_buffer(self, buffer):
         length = len(buffer)
@@ -502,7 +512,8 @@ class SyncVNCClient:
 
 client = SyncVNCClient(hostname="localhost", password="password")
 client.screenshot(show = True)
-time.sleep(2)
-client = SyncVNCClient(hostname="localhost", password="password")
+time.sleep(5)
 client.screenshot(show = True)
+
+#client = SyncVNCClient(hostname="localhost", password="password")
 #client.screenshot(refresh=False, incremental=2, show = True)
