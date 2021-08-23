@@ -7,9 +7,7 @@ from des import DesKey
 from PIL import Image
 from threading import Thread, Lock
 
-from . import keysym
-
-CHUNK_SIZE = 65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
+CHUNK_SIZE = 4096 #65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
 
 HANDSHAKE = ""
 PIXEL_FORMAT = "BBBBHHHBBBxxx"
@@ -161,6 +159,7 @@ class SyncVNCClient(Thread):
         self._framebuffer_updated = False
         self._please_stop = False
         self._connected_and_initialized = False
+        self.first_screenshot = True
         self._connect()
     
     def __del__(self):
@@ -431,7 +430,7 @@ class SyncVNCClient(Thread):
 
 
     def _check_for_messages(self):
-        message = self.recv_socket.recv(1)
+        message = self._safe_recv(1)
         if message:
             message_type = message
             self._handle_server_message(message_type[0])
@@ -535,9 +534,16 @@ class SyncVNCClient(Thread):
         self._safe_send(event)
 
     def screenshot(self, filename="screenshot.png", refresh=True, incremental=0, show=False, x=0, y=0, width=1, height=1):
-        if refresh:
-            self._request_framebuffer_update(x, y, width, height, incremental=incremental)
-       
+        
+        # Always need to call with incremental = 0 to actually get a screenshot.
+        # Seems to get a blank screen otherwise.
+        self._request_framebuffer_update(x, y, width, height, incremental=0)
+
+        # If this is not the 1st screenshot, then use incremental=2.
+        if not self.first_screenshot:
+            self._request_framebuffer_update(x, y, 1447, 737, incremental=2)
+        
+
         # Flatten list
         img = Image.frombytes("RGBX", (self.framebuffer.width, self.framebuffer.height), self.framebuffer.flatten())
         rgb_image = img.convert("RGB")
@@ -545,6 +551,10 @@ class SyncVNCClient(Thread):
             rgb_image.show()
         else:
             rgb_image.save(filename)
+        self.first_screenshot = False
+        
+        
+        
 
     def cut_buffer(self, buffer):
         length = len(buffer)
@@ -564,4 +574,3 @@ class SyncVNCClient(Thread):
     def run(self):
         while not self._please_stop:
             self._check_for_messages()
-
