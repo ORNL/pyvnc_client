@@ -5,6 +5,7 @@ import time
 
 from des import DesKey
 from PIL import Image
+from threading import Thread, Lock
 
 from . import keysym
 
@@ -29,7 +30,7 @@ RAW_ENCODING = 0
 DESKTOP_SIZE_ENCODING = -223
 
 logger = logging.getLogger("pyvnc_sync")
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.DEBUG)
 
 def _unpack_single(t, data):
     """
@@ -135,55 +136,64 @@ class PixelFormat(object):
         return struct.pack(PIXEL_FORMAT, self.bits_per_pixel, self.depth, self.big_endian_flag, self.true_color_flag, self.red_max, self.green_max, self.blue_max, self.red_shift, self.green_shift, self.blue_shift)
         
 
-class SyncVNCClient:
+class SyncVNCClient(Thread):
     """
     Synchronous VNC client. The goal is to be as stupid simple and barebones as
     possible.
     """
 
-    def __init__(self, hostname, port=5900, password=None, share=False, pixel_format=PixelFormat(), log_level=logging.ERROR):
+    def __init__(self, hostname, port=5900, password=None, share=False, pixel_format=PixelFormat(), log_level=logging.ERROR):#, timeout=1):
+        super().__init__()
         logger.setLevel(log_level)
         logging.basicConfig(level=log_level)
-        self.s = socket.create_connection((hostname, port))
+        self._socket_lock = Lock()
+        self.send_socket = socket.create_connection((hostname, port))
+        self.recv_socket = socket.fromfd(self.send_socket.fileno(), self.send_socket.family, self.send_socket.type)
+        #self._socket_timeout = timeout
+        #self.s.settimeout(timeout)
         self.password = password 
         self.share=share
         self.framebuffer = Framebuffer(0, 0, 4)
         self.pixel_format = pixel_format
         self.server_pixel_format = None
-        self.name = None
+        self.vnc_name = ""
         self.mouse_buttons = 0x00
+        self._framebuffer_updated = False
+        self._please_stop = False
+        self._connected_and_initialized = False
         self._connect()
     
     def __del__(self):
-        self.s.close()
+        self.send_socket.close()
+        self.recv_socket.close()
     
     def _connect(self):
         self._protocol_handshake()
         self._security_handshake()
         self._initialization()
-
+        self._connected_and_initialized = True
 
     def _protocol_handshake(self):
-        self.vnc_server_version = self.s.recv(CHUNK_SIZE)
-        if self.vnc_server_version == b'RFB 003.008\\n':
-            raise NotImplementedError(f"Backwards compatibility with older protocal versions is not yet supported: {str(self.vnc_server_version)}")
-        self.s.send(b'RFB 003.008\n')
+        self.vnc_server_version = self._full_recv(12)
+        if self.vnc_server_version != b'RFB 003.008\x0a':
+            raise NotImplementedError(f"Backwards compatibility with older protocol versions is not yet supported: {str(self.vnc_server_version)}")
+        self._safe_send(b'RFB 003.008\x0a')
 
 
     def _security_handshake(self):
         # Get security types 
-        types = self.s.recv(CHUNK_SIZE)
-        number_of_types = struct.unpack(U8, types[:1])[0]
+        number_of_types = _unpack_single(U8, self._full_recv(1))
 
         # handle server aborting the connection
         if number_of_types == 0:
             self._get_failure_reason()
             
-        supported_security_types = struct.unpack(f'{number_of_types}B', types[1:])
+        supported_security_types = self._full_recv(number_of_types)
+        supported_security_types = struct.unpack(f'{number_of_types}B', supported_security_types)
 
         # choose no security by default
         if 1 in supported_security_types:
-            self.s.send(struct.pack(U8, 1))
+            self._safe_send(struct.pack(U8, 1))
 
         # otherwise use VNC security
         elif 2 in supported_security_types:
@@ -191,19 +201,19 @@ class SyncVNCClient:
                 raise ValueError("Server requires a password but one was not supplied")
 
             # select VNC security
-            self.s.send(struct.pack(U8, 2))
+            self._safe_send(struct.pack(U8, 2))
 
             # server sends a randomly generated challenge
-            challenge = self.s.recv(CHUNK_SIZE)
+            challenge = self._full_recv(16)
 
             # encrypt the challenge with the password and send it back
             new_password = self._process_password(self.password)
             key = DesKey(new_password)
             response = key.encrypt(challenge)
-            self.s.send(response)
+            self._safe_send(response)
 
             # Retrieve SecurityResult
-            handshake_result = _unpack_single(U32, self.s.recv(4))
+            handshake_result = _unpack_single(U32, self._full_recv(4))
             if handshake_result:
                 self._get_failure_reason()
 
@@ -212,9 +222,9 @@ class SyncVNCClient:
 
 
     def _get_failure_reason(self):
-        failure_packet = self.s.recv(CHUNK_SIZE)
-        reason_len = _unpack_single(U32, failure_packet[:4])
-        reason = _unpack_single(STRING.format(reason_len), failure_packet[4:])
+        reason_len = _unpack_single(U32, self._full_recv(4))
+        reason = self._full_recv(reason_len)
+        reason = _unpack_single(STRING.format(reason_len), reason)
         raise ConnectionError(f"VNC Server refused connection with reason: {reason.decode('ASCII')}")
         
 
@@ -251,21 +261,21 @@ class SyncVNCClient:
         for encoding in encodings:
             message += struct.pack(S32, encoding) # raw
         # message += struct.pack(S32, DESKTOP_SIZE_ENCODING) #DesktopSize pseudo-encoding
-        self.s.send(message)
+        self._safe_send(message)
 
 
     def _initialization(self):
         # ClientInit
-        self.s.send(struct.pack(BOOL, self.share))
+        self._safe_send(struct.pack(BOOL, self.share))
         # Start receiving server init
-        framebuffer_width = struct.unpack(U16, self.s.recv(2))[0]
-        framebuffer_height = struct.unpack(U16, self.s.recv(2))[0]
-        pixel_format = struct.unpack(PIXEL_FORMAT, self.s.recv(16))
-        name_length = struct.unpack(U32, self.s.recv(4))[0]
+        framebuffer_width = struct.unpack(U16, self._full_recv(2))[0]
+        framebuffer_height = struct.unpack(U16, self._full_recv(2))[0]
+        pixel_format = struct.unpack(PIXEL_FORMAT, self._full_recv(16))
+        name_length = struct.unpack(U32, self._full_recv(4))[0]
         name_string = struct.unpack(STRING.format(name_length), 
-                                    self.s.recv(name_length))[0]
+                                    self._full_recv(name_length))[0]
         self.server_pixel_format = PixelFormat(*pixel_format)
-        self.name = name_string
+        self.vnc_name = name_string
         self._set_encodings([RAW_ENCODING, DESKTOP_SIZE_ENCODING])
         self._set_pixel_format()
 
@@ -278,41 +288,35 @@ class SyncVNCClient:
         else:
             self.pixel_format = pixel_format
 
-        self.s.send(struct.pack(SET_PIXEL_FORMAT, 0, pixel_format.pack()))
+        self._safe_send(struct.pack(SET_PIXEL_FORMAT, 0, pixel_format.pack()))
 
 
 
     def _handle_framebuffer_update(self):
         def _get_rectangle_header():
-            x_position = _unpack_single(U16, self.s.recv(2))
-            y_position = _unpack_single(U16, self.s.recv(2))
-            width = _unpack_single(U16, self.s.recv(2))
-            height = _unpack_single(U16, self.s.recv(2))
-            encoding_type = _unpack_single(S32, self.s.recv(4))
+            x_position = _unpack_single(U16, self._full_recv(2))
+            y_position = _unpack_single(U16, self._full_recv(2))
+            width = _unpack_single(U16, self._full_recv(2))
+            height = _unpack_single(U16, self._full_recv(2))
+            encoding_type = _unpack_single(S32, self._full_recv(4))
             logger.debug(f"x={x_position} y={y_position} width={width} height={height} encoding_type={encoding_type}")
             return x_position, y_position, width, height, encoding_type
 
         def _collect_rectangle(width, height, encoding_type):
-
             pixel_data = b''
             if encoding_type == RAW_ENCODING:
                 num_bytes = width * height * self.pixel_format.bits_per_pixel // 8
                 logger.debug(f"Collecting {num_bytes} bytes from socket for rectangle.")
-                n = 0
-                while n < num_bytes:
-                    num_to_grab = min(num_bytes - n, CHUNK_SIZE)
-                    buffer = self.s.recv(num_to_grab)
-                    pixel_data = pixel_data + buffer
-                    n += len(buffer)
-                if n > num_bytes:
+                pixel_data = self._full_recv(num_bytes)
+                if len(pixel_data) > num_bytes:
                     logger.warning("Received wrong number of bytes in rectangle.")
             else:
                 raise ValueError(f"Server sent unsupported rectangle encoding: {encoding_type}")
             
             return pixel_data
         
-        self.s.recv(1)
-        number_of_rectangles = _unpack_single(U16, self.s.recv(2))
+        self._full_recv(1)
+        number_of_rectangles = _unpack_single(U16, self._full_recv(2))
         logger.debug(f"{number_of_rectangles} rectangles")
         rectangles = []
         resize = False
@@ -335,34 +339,40 @@ class SyncVNCClient:
             self.framebuffer.resize(new_width, new_height)
         for rectangle in rectangles:
             self.framebuffer.set_pixels(*rectangle)
+
+        # mark the framebuffer as updated in case a framebuffer update request is waiting
+        self._framebuffer_updated = True
                 
 
     def _handle_set_color_map_entries(self):
-        self.s.recv(1)
-        _ = _unpack_single(U16, self.s.recv(2))
-        number_of_colors = _unpack_single(U16, self.s.recv(2))
+        self._full_recv(1)
+        _ = _unpack_single(U16, self._full_recv(2))
+        number_of_colors = _unpack_single(U16, self._full_recv(2))
         
         # drop color map entries
-        self.s.recv(number_of_colors * 6)
+        self._full_recv(number_of_colors * 6)
 
     def _handle_bell(self):
         # do nothing
         pass
 
     def _handle_server_cut_text(self):
-        print(self.s.recv(1))
-        length = _unpack_single(U32, self.s.recv(4))
+        #print(self._safe_recv(1))
+        length = _unpack_single(U32, self._full_recv(4))
         # drop clipboard data for now
-        self.s.recv(length)
+        self._full_recv(length)
 
     def _handle_server_message(self, message_type):
+        #self.s.settimeout(None)
         message_handler_callbacks = {
             0 : self._handle_framebuffer_update,
             1 : self._handle_set_color_map_entries,
             2 : self._handle_bell,
             3 : self._handle_server_cut_text,
         }
+        #print(f"handling message {message_type}")
         message_handler_callbacks[message_type]()
+        #self.s.settimeout(self._socket_timeout)
 
     def _request_framebuffer_update(self, x, y, width, height, incremental=1):
         message = struct.pack(U8, 3)
@@ -371,16 +381,62 @@ class SyncVNCClient:
         message += struct.pack(U16, y)
         message += struct.pack(U16, width)
         message += struct.pack(U16, height)
-        self.s.send(message)
-        framebuffer_updated = False
-        while not framebuffer_updated:
-            message_type = self._check_for_messages()
-            if message_type == 0:
-                framebuffer_updated = True
+        self._safe_send(message)
+        self._framebuffer_updated = False # set framebuffer updated to false
+        while not self._framebuffer_updated: # block until the framebuffer is updated by the response handler thread
+            time.sleep(0.1)
+        self._framebuffer_updated = True
+
+    def _safe_send(self, *args, **kwargs):
+        #print("send waiting for lock")
+        #with self._socket_lock:
+        #print("sending")
+        self.send_socket.send(*args, **kwargs)
+        #print("send done")
+
+    def _safe_recv(self, *args, **kwargs):
+        #print("recv waiting for lock")
+        #d = b''
+        #with self._socket_lock:
+        #print("receiving")
+        d = self.recv_socket.recv(*args, **kwargs)
+        #print("receive done")
+        return d
+
+    def _full_recv(self, bufsize, *args, **kwargs):
+        buf = b''
+        n = 0
+        #print("full receive")
+        while n < bufsize:
+            try:
+                buf += self._safe_recv(min(bufsize - n, CHUNK_SIZE), *args, **kwargs)
+            except socket.timeout:
+                print("timed out")
+                continue
+            n = len(buf)
+        return buf
+
+    def _timeout_send(self, *args, **kwargs):
+        try:
+            self._safe_send(*args, **kwargs)
+        except socket.timeout:
+            pass
+
+    def _timeout_recv(self, *args, **kwargs):
+        try:
+            return self._full_recv(*args, **kwargs)
+        except socket.timeout:
+            pass
+        return None
+
 
     def _check_for_messages(self):
-        message_type = self.s.recv(1)[0]
-        self._handle_server_message(message_type)
+        message = self.recv_socket.recv(1)
+        if message:
+            message_type = message
+            self._handle_server_message(message_type[0])
+        else:
+            message_type = None
         return message_type
 
     def refresh_resolution(self):
@@ -412,37 +468,42 @@ class SyncVNCClient:
     def key_down_event(self, key):
         key = self._key_to_keysym(key)
         message = struct.pack(KEY_EVENT, 4, 1, key)
-        self.s.send(message) 
+        self._safe_send(message) 
 
     def key_up_event(self, key):
         key = self._key_to_keysym(key)
         message = struct.pack(KEY_EVENT, 4, 0, key)
-        self.s.send(message) 
+        self._safe_send(message) 
     
     # Press and release a key
-    def press_key(self, key, duration=0.01):
+    def press_key(self, key, duration=0.1):
         self.key_down_event(key)
         time.sleep(duration)
         self.key_up_event(key)
 
-    def _button_click(self, button, x, y, duration=0.01):
-        self.pointer_event(buttons=[button], down=True, x=x, y=y)
+    def _button_click(self, button, x, y, duration=0.1):
+        self.pointer_event(x=x, y=y)
         time.sleep(duration)
+        #print("pointer event 1")
+        self.pointer_event(buttons=[button], down=True, x=x, y=y)
+        #print("sleeping")
+        time.sleep(duration)
+        #print("pointer event 2")
         self.pointer_event(buttons=[button], down=False, x=x, y=y)
 
-    def left_click(self, x, y, duration=0.01):
+    def left_click(self, x, y, duration=0.1):
         self._button_click(1, x, y, duration)
 
-    def right_click(self, x, y, duration=0.01):
+    def right_click(self, x, y, duration=0.1):
         self._button_click(3, x, y, duration)
 
-    def middle_click(self, x, y, duration=0.01):
+    def middle_click(self, x, y, duration=0.1):
         self._button_click(2, x, y, duration)
 
-    def scroll_up(self, x, y, duration=0.01):
+    def scroll_up(self, x, y, duration=0.1):
         self._button_click(4, x, y, duration)
 
-    def scroll_down(self, x, y, duration=0.01):
+    def scroll_down(self, x, y, duration=0.1):
         self._button_click(5, x, y, duration)
 
     def pointer_event(self, buttons=[], down=False, x=0, y=0):
@@ -461,17 +522,17 @@ class SyncVNCClient:
 
         # flip the corresponding bits in the mask
         for button in buttons:
-            button_mask ^= 1 << button
+            button_mask ^= 1 << (button - 1)
 
         # apply the mask to the mouse_buttons member
         if down:
             self.mouse_buttons |= button_mask
         else:
             self.mouse_buttons &= button_mask
-
+        #print(self.mouse_buttons)
         # send the current mouse_buttons to the server
         event = struct.pack(POINTER_EVENT, 0x05, self.mouse_buttons, x, y)
-        self.s.send(event)
+        self._safe_send(event)
 
     def screenshot(self, filename="screenshot.png", refresh=True, incremental=0, show=False, x=0, y=0, width=1, height=1):
         if refresh:
@@ -494,4 +555,13 @@ class SyncVNCClient:
         message += struct.pack(U32, length)
         for b in buffer:
             message += struct.pack(U8, ord(b))
-        self.s.send(message)
+        self._safe_send(message)
+
+    def stop(self):
+        self._please_stop = True
+        self.join()
+
+    def run(self):
+        while not self._please_stop:
+            self._check_for_messages()
+
