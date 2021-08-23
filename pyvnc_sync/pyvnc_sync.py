@@ -7,6 +7,8 @@ from des import DesKey
 from PIL import Image
 from threading import Thread, Lock
 
+from . import keysym
+
 CHUNK_SIZE = 4096 #65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
 
 HANDSHAKE = ""

@@ -1,10 +1,7 @@
 import os
 import setuptools
 
-version = os.getenv("VERSION")
-if version is None:
-    version = "0.0.0.dev0"
-
+version = "0.0.0.dev4"
 setuptools.setup(
     name="pyvnc_sync",
     version=version,
@@ -12,7 +9,7 @@ setuptools.setup(
     author_email="weberb@ornl.gov",
     description="Very simple synchronous VNC client",
     packages=setuptools.find_packages(),
-    install_requires=["des"],
+    install_requires=["des", "pillow"],
     classifiers=[
         "Programming Language :: Python :: 3",
     ],
