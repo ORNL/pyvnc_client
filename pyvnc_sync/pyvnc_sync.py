@@ -7,6 +7,8 @@ from des import DesKey
 from PIL import Image
 from threading import Thread, Lock
 
+from . import keysym
+
 CHUNK_SIZE = 4096 #65536 #Maybe receiving 64KB at a time will make these framebuffer updates faster?
 
 HANDSHAKE = ""
@@ -142,6 +144,7 @@ class SyncVNCClient(Thread):
 
     def __init__(self, hostname, port=5900, password=None, share=False, pixel_format=PixelFormat(), log_level=logging.ERROR):#, timeout=1):
         super().__init__()
+        self._running = False
         logger.setLevel(log_level)
         logging.basicConfig(level=log_level)
         self._socket_lock = Lock()
@@ -163,6 +166,8 @@ class SyncVNCClient(Thread):
         self._connect()
     
     def __del__(self):
+        if self._running:
+            self.stop()
         self.send_socket.close()
         self.recv_socket.close()
     
@@ -568,9 +573,11 @@ class SyncVNCClient(Thread):
         self._safe_send(message)
 
     def stop(self):
-        self._please_stop = True
-        self.join()
+        if self._running:
+            self._please_stop = True
+            self.join()
 
     def run(self):
+        self._running = True
         while not self._please_stop:
             self._check_for_messages()
