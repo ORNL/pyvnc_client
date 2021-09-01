@@ -1,7 +1,6 @@
-import os
 import setuptools
 
-version = "0.0.0.dev4"
+version = "0.0.1"
 setuptools.setup(
     name="pyvnc_sync",
     version=version,
