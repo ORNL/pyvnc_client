@@ -54,6 +54,7 @@ class SyncVNCClient(Thread):
 
     def __init__(self, hostname, port=5900, password=None, share=False, pixel_format=PixelFormat(), log_level=logging.INFO, recv_socket_timeout=1):
         super().__init__()
+        self._running = False
         logger.setLevel(log_level)
         self.recv_socket_timeout = recv_socket_timeout
         self._socket_lock = Lock()
@@ -80,6 +81,8 @@ class SyncVNCClient(Thread):
         self._connect()
     
     def __del__(self):
+        if self._running:
+            self.stop()
         if self.send_socket is not None:
             self.send_socket.close()
         if self.recv_socket is not None:
@@ -568,17 +571,22 @@ class SyncVNCClient(Thread):
 
     def stop(self):
         self._please_stop = True
-        self.join()
-        self.running = False
+        if self._running:
+            self.join()
+            self.running = False
 
     def run(self):
-        self.running = True
+        self._running = True
         while not self._please_stop:
             try:
                 self._check_for_messages()
             except ConnectionError as e:
                 logger.warning(f"Receive thread caught ConnectionError {e} - waiting for reconnection")
+
+                # wait until the main thread tries to start reconnecting
                 while not self._reconnecting:
                     time.sleep(0.5)
+
+                # wait until the reconnection is finished
                 with self._reconnecting_lock:
                     self._reconnecting = False
