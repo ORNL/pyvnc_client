@@ -78,6 +78,7 @@ class SyncVNCClient(Thread):
         self._connected_and_initialized = False
         self.first_screenshot = True
         self._reconnecting = False
+        self._offset = 0 # sometimes clicks in the same spot don't work?? flip this and add to mouse location to make subsequent clicks always different. super hacky
         self._connect()
     
     def __del__(self):
@@ -513,6 +514,17 @@ class SyncVNCClient(Thread):
         Down=True sets the bits in buttons
         IE calling pointer_event(buttons=[1, 2], down=True) will mark the left and middle mouse buttons as down at (0, 0)
         """
+        if x == self.framebuffer.width - 1:
+            x -= self._offset
+        else:
+            x += self._offset
+        if y == self.framebuffer.height - 1:
+            y -= self._offset
+        else:
+            y += self._offset
+
+        self._offset ^= 1 # flip offset flag
+
         if down:
             # do not affect buttons that are already down
             button_mask = 0x00
