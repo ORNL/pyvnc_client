@@ -92,49 +92,51 @@ class SyncVNCClient(Thread):
     def _connect(self, retries=0, retry_sleep=0):
         # try to acquire the reconnect lock. if it's already acquired, another thread is already reconnecting
         with self._reconnecting_lock:
-            self._reconnecting = True
-            logger.debug("(Re)connect lock acquired.")
-            tries = 0
-            # try to (re)connect until successful
-            logger.debug(f"(Re)connect waiting for send socket lock.")
-            with self._send_socket_lock:
-                logger.debug(f"(Re)connect waiting for recv socket lock.")
-                with self._recv_socket_lock:
-                    while (retries == 0 or tries < retries) and not self._connected_and_initialized:
-                        logger.info("Connecting to VNC server...")
-                        try:
-                            # close existing sockets if this is a reconnect
-                            if self.send_socket is not None:
-                                self.send_socket.close()
-                            if self.recv_socket is not None:
-                                self.recv_socket.close()
+            try:
+                self._reconnecting = True
+                logger.debug("(Re)connect lock acquired.")
+                tries = 0
+                # try to (re)connect until successful
+                logger.debug(f"(Re)connect waiting for send socket lock.")
+                with self._send_socket_lock:
+                    logger.debug(f"(Re)connect waiting for recv socket lock.")
+                    with self._recv_socket_lock:
+                        while (retries == 0 or tries < retries) and not self._connected_and_initialized:
+                            logger.info("Connecting to VNC server...")
+                            try:
+                                # close existing sockets if this is a reconnect
+                                if self.send_socket is not None:
+                                    self.send_socket.close()
+                                if self.recv_socket is not None:
+                                    self.recv_socket.close()
 
-                            # create the first socket
-                            self.send_socket = socket.create_connection((self.hostname, self.port))
+                                # create the first socket
+                                self.send_socket = socket.create_connection((self.hostname, self.port))
 
-                            # create the second socket using the first sockets file descriptor. this lets python use the same socket in 2 different threads without connecting an entirely separate socket
-                            self.recv_socket = socket.fromfd(self.send_socket.fileno(), self.send_socket.family, self.send_socket.type)
+                                # create the second socket using the first sockets file descriptor. this lets python use the same socket in 2 different threads without connecting an entirely separate socket
+                                self.recv_socket = socket.fromfd(self.send_socket.fileno(), self.send_socket.family, self.send_socket.type)
 
-                            # set a timeout on the recv_socket so it releases the lock periodically
-                            self.recv_socket.settimeout(self.recv_socket_timeout)
-                            logger.info("Connected to VNC Server.")
-                            logger.info("Initializing VNC connection...")
-                            self._protocol_handshake(needs_lock=False)
-                            self._security_handshake(needs_lock=False)
-                            self._initialization(needs_lock=False)
-                            self._connected_and_initialized = True
-                            logger.info("VNC initialized.")
-                        except KeyboardInterrupt:
-                            raise
-                        except ConnectionError:
-                            if retries != 0 and tries == retries:
-                                logger.error(f"Failed to connect after {retries} tries. Giving up.")
+                                # set a timeout on the recv_socket so it releases the lock periodically
+                                self.recv_socket.settimeout(self.recv_socket_timeout)
+                                logger.info("Connected to VNC Server.")
+                                logger.info("Initializing VNC connection...")
+                                self._protocol_handshake(needs_lock=False)
+                                self._security_handshake(needs_lock=False)
+                                self._initialization(needs_lock=False)
+                                self._connected_and_initialized = True
+                                logger.info("VNC initialized.")
+                            except KeyboardInterrupt:
                                 raise
-                            logger.warning(f"Connection failed... retrying in {retry_sleep} seconds...")
-                            tries += 1
-                            if retry_sleep > 0:
-                                time.sleep(retry_sleep)
-                        # wait for both socket locks to release to prevent communication during reconnect
+                            except ConnectionError:
+                                if retries != 0 and tries == retries:
+                                    logger.error(f"Failed to connect after {retries} tries. Giving up.")
+                                    raise
+                                logger.warning(f"Connection failed... retrying in {retry_sleep} seconds...")
+                                tries += 1
+                                if retry_sleep > 0:
+                                    time.sleep(retry_sleep)
+            finally:
+                self._reconnecting = False
 
     def _protocol_handshake(self, needs_lock=True):
         logger.debug("Conducting protocol handshake")
@@ -537,7 +539,6 @@ class SyncVNCClient(Thread):
         # flip the corresponding bits in the mask
         for button in buttons:
             button_mask ^= 1 << (button - 1)
-
         # apply the mask to the mouse_buttons member
         if down:
             self.mouse_buttons |= button_mask
