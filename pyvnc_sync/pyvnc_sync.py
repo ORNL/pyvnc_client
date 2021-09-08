@@ -367,6 +367,7 @@ class SyncVNCClient(Thread):
                         self.send_socket.send(*args, **kwargs)
                 else:
                     self.send_socket.send(*args, **kwargs)
+            logger.debug(f"Send {args[0]}")
         except ConnectionError as e:
             logger.warning(f"Send thread caught ConnectionError {e} - reconnecting")
             logger.debug("Closing send socket")
@@ -383,7 +384,6 @@ class SyncVNCClient(Thread):
             # try the send again
             self._safe_send(*args, needs_lock=needs_lock, **kwargs)
             logger.warning(f"Send successfully recovered.")
-        logger.debug(f"Send {args[0]}")
 
     def _safe_recv(self, *args, retry_on_timeout=True, needs_lock=True, **kwargs):
         do_while = True # emulate a do while loop
