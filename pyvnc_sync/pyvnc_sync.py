@@ -380,6 +380,8 @@ class SyncVNCClient(Thread):
             logger.debug("Retry the send")
             # try the send again
             self._safe_send(*args, needs_lock=needs_lock, **kwargs)
+            logger.warning(f"Send successfully recovered.")
+        logger.debug(f"Send {args[0]}")
 
     def _safe_recv(self, *args, retry_on_timeout=True, needs_lock=True, **kwargs):
         do_while = True # emulate a do while loop
@@ -602,3 +604,4 @@ class SyncVNCClient(Thread):
                 # wait until the reconnection is finished
                 with self._reconnecting_lock:
                     self._reconnecting = False
+                logger.warning("Receive thread detected successful reconnection.")
