@@ -3,5 +3,6 @@
 dist/
 *egg-info*
 pypi_password
+rfbrfc.html
 *.ps1
 *__pycache__*

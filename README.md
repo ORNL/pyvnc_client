@@ -17,3 +17,6 @@ c.left_click(10, 20) # left click at position x=10 y=20
 c.stop() # manually stop and join the listener thread, though this isn't strictly necessary as the __del__ method will also stop the thread and close all open socket objects when c goes out of scope
 ```
 
+## Ref
+
+https://datatracker.ietf.org/doc/html/rfc6143
