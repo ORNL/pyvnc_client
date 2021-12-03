@@ -14,5 +14,6 @@ from pyvnc_sync.pyvnc_sync import SyncVNCClient
 c = SyncVNCClient("<hostname>", port=<port>, password="<vnc password>") # this will open the sockets and initialize the connection to the VNC server
 c.start() # this will start the thread which listens for asynchronous updates from the server
 c.left_click(10, 20) # left click at position x=10 y=20
-c.stop() # manually stop and join the listener thread, though this isn't strictly necessary as the __del__ method will also stop the thread and close all open socket objects.
+c.stop() # manually stop and join the listener thread, though this isn't strictly necessary as the __del__ method will also stop the thread and close all open socket objects when c goes out of scope
 ```
+
