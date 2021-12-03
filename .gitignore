@@ -1,0 +1,7 @@
+*~
+*.swp
+dist/
+*egg-info*
+pypi_password
+*.ps1
+*__pycache__*
